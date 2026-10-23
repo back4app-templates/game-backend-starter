@@ -47,3 +47,23 @@
 - Whether Back4app's batch endpoint accepts `/users` sign-ups with `authData.anonymous` under the master key the
   way parse-server 7.5.4 does (the seeder depends on it).
 - Throttle behaviour at 16 req/s with 50-item batches (code 155 retries are counted in the seed output).
+
+## 2026-10-23 — live run on Back4app (backend `game-backend-starter`, Parse Server 7.5.2, Free plan)
+
+- **Cloud Code upload.** `config.js` only lands when the `cloud` folder is selected in the explorer before *Upload →
+  Upload Files*; without the selection the file is silently dropped. The first Deploy of a fresh backend shipped
+  `config.js` but not the edited `main.js` (the editor's unsaved buffer is not part of the deploy); a second edit +
+  Deploy shipped it. Proof: `POST /functions/setupSchema` → 141 until then, then the full schema report.
+- **`setupSchema` from the REST key** created Player, Score, Best, Save, RejectedScore with their fields, CLPs and
+  indexes in one call. Index Manager afterwards shows the directions preserved on MongoDB:
+  `best_alltime {level:1, score:-1, createdAt:1}`, `best_weekly {level:1, week:1, weekScore:-1, createdAt:1}`,
+  `best_player_level`, `best_seedKey`, `score_player_createdAt {player:1, createdAt:-1}`, `score_player_nonce` —
+  unlike the local PostgreSQL adapter, which drops directions.
+- **Live test suite without the master key:** 17 pass, 1 skip (master-only write test), 1 finding — `POST
+  /classes/Cheat` with a guest session created a class (HTTP 201). *Client Class Creation* lives under App
+  Settings → Advanced Options and is fixed at **Yes on the Free plan** ("Upgrade your plan to change custom parse
+  options"); the test now records the observation instead of failing, and deletes its row. The empty class had to be
+  removed in the dashboard (Browser → ⋮ → Delete this class; a class with rows cannot be deleted).
+- **Seed 1,000,000 `Best` rows via `seedBest`, REST key only:** 20,000 requests of 50 rows at the 16 req/s bucket;
+  first 400k rows in 963 s (≈425 rows/s); 150 rows skipped by `seedKey` after a throttled request was retried —
+  the dedup path working as designed. Full numbers in `docs/evidence/seed-live-2026-10-23.log`.
