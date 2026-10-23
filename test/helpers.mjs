@@ -4,8 +4,12 @@ import { loadEnv } from '../scripts/lib/env.mjs';
 import { makeClient } from '../scripts/lib/rest.mjs';
 import config from '../cloud/config.js';
 
-export const env = loadEnv({ master: true });
-export const api = makeClient(env);
+// MASTER_KEY in .env: the helpers below read/reset hidden state through the REST API with the master key.
+// No MASTER_KEY (TEST_SERVER_URL=https://parseapi.back4app.com, staging app): the same helpers go through the
+// Cloud functions testInspect / testReset / testPatch, which need config.SETUP_ENABLED = true on the server.
+export const env = loadEnv({ test: true });
+export const api = makeClient(env, { retry: true });
+export const hasMasterKey = !!env.MASTER_KEY;
 export { config };
 
 /** Anonymous sign-up (authData.anonymous). Returns { id, session, anonymousId }. */
@@ -47,13 +51,20 @@ export function uniqueName(prefix = 'test') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Master-key helpers used to inspect or reset state the API deliberately hides from clients. */
-export const master = {
-  find: (cls, where, extra = {}) => api.request('GET', `/classes/${cls}?${new URLSearchParams({ where: JSON.stringify(where), limit: '1000', ...extra })}`, { master: true }).then((r) => r.json.results || []),
+/** Unwrap a Cloud function result or throw with the envelope (setup helpers must not fail silently). */
+async function must(name, params) {
+  const r = await api.call(name, params);
+  if (!r.ok) throw new Error(`${name} failed: ${JSON.stringify(r.error)}`);
+  return r.result;
+}
+
+/** Privileged helpers used to inspect or reset state the API deliberately hides from clients. */
+export const master = hasMasterKey ? {
+  find: (cls, where) => api.request('GET', `/classes/${cls}?${new URLSearchParams({ where: JSON.stringify(where), limit: '1000' })}`, { master: true }).then((r) => r.json.results || []),
   count: (cls, where) => api.request('GET', `/classes/${cls}?${new URLSearchParams({ where: JSON.stringify(where), count: '1', limit: '0' })}`, { master: true }).then((r) => r.json.count),
   async purge(cls, where) {
     for (;;) {
-      const rows = await this.find(cls, where, { keys: 'objectId' });
+      const rows = await api.request('GET', `/classes/${cls}?${new URLSearchParams({ where: JSON.stringify(where), limit: '1000', keys: 'objectId' })}`, { master: true }).then((r) => r.json.results || []);
       if (!rows.length) return;
       for (let i = 0; i < rows.length; i += 50) {
         await api.batch(rows.slice(i, i + 50).map((r) => ({ method: 'DELETE', path: `/classes/${cls}/${r.objectId}` })), { master: true });
@@ -61,8 +72,25 @@ export const master = {
     }
   },
   async update(cls, id, body) {
-    return api.request('PUT', `/classes/${cls}/${id}`, { master: true, body });
+    const r = await api.request('PUT', `/classes/${cls}/${id}`, { master: true, body });
+    if (r.status !== 200) throw new Error(`update ${cls}/${id} failed: ${r.status} ${JSON.stringify(r.json)}`);
+    return r.json;
   },
+} : {
+  find: (cls, where) => must('testInspect', { className: cls, where, limit: 1000 }).then((r) => r.results),
+  count: (cls, where) => must('testInspect', { className: cls, where, count: true }).then((r) => r.count),
+  purge: (cls, where) => must('testReset', { className: cls, where }),
+  update: (cls, id, body) => must('testPatch', { className: cls, objectId: id, set: body }),
 };
+
+/** Seed public Best rows through the Cloud function seedBest (player = null, seeded = true); ≤ 50 per call. */
+export async function seedBest(rows) {
+  let created = 0, skipped = 0;
+  for (let i = 0; i < rows.length; i += config.SEED_BATCH_MAX) {
+    const r = await must('seedBest', { rows: rows.slice(i, i + config.SEED_BATCH_MAX) });
+    created += r.created; skipped += r.skipped;
+  }
+  return { created, skipped };
+}
 
 export const userPointer = (id) => ({ __type: 'Pointer', className: '_User', objectId: id });

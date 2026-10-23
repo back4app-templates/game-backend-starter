@@ -18,16 +18,25 @@ export function loadDotenv(file = path.join(ROOT, '.env')) {
     if (!m) continue;
     let value = m[2];
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    else value = value.replace(/\s+#.*$/, '').trim(); // unquoted values may carry a trailing "# comment" (as .env.example does)
     if (process.env[m[1]] === undefined) process.env[m[1]] = value;
   }
   return true;
 }
 
 /**
- * @param {{ master?: boolean }} [opts] master: require MASTER_KEY too (setup, seed, tests)
+ * @param {{ master?: boolean, test?: boolean }} [opts]
+ *   master: require MASTER_KEY too (only the local dev server needs it; setup/seed/tests work without one)
+ *   test:   honour TEST_SERVER_URL as an override of SERVER_URL (point the suite at a staging backend)
  */
 export function loadEnv(opts = {}) {
   loadDotenv();
+  if (opts.test && process.env.TEST_SERVER_URL && process.env.TEST_SERVER_URL !== process.env.SERVER_URL) {
+    // The suite targets another server than .env describes: its MASTER_KEY belongs to the .env server, so the
+    // run goes through the Cloud Code setup helpers instead (see cloud/config.js SETUP_ENABLED).
+    process.env.SERVER_URL = process.env.TEST_SERVER_URL;
+    process.env.MASTER_KEY = '';
+  }
   const required = ['APP_ID', 'SERVER_URL'];
   if (opts.master) required.push('MASTER_KEY');
   const missing = required.filter((k) => !process.env[k]);

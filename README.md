@@ -36,7 +36,18 @@ browser / game client ── Parse SDK or REST ──▶ Parse Server (Back4app)
 | `putSave({slot, baseVersion, blob})` | yes | optimistic write; `STALE_SAVE` with `currentVersion` when `baseVersion` is behind |
 | `getSave({slot})` | yes | `{version, blob}`; `version 0, blob null` for an empty slot |
 
-Tunables (ceiling per level, rate limit, slot count, blob size, week key) live in `cloud/config.js`.
+Setup helpers, unauthenticated, gated by `SETUP_ENABLED` in `cloud/config.js` (see "Without the master key"):
+
+| Cloud function | Does |
+|---|---|
+| `setupSchema({allowRerun?})` | creates/updates the five classes (fields, CLPs, indexes); refuses once `Best` has ≥ 2 rows unless `allowRerun: true` |
+| `seedBest({rows})` | ≤ 50 rows `{playerName, level, score, week, weekScore, seedKey?}` → public `Best` rows with `player = null`, `seeded = true`; rows whose `seedKey` exists are skipped |
+| `testReset({className, where})` | deletes the rows of one class matching `where` (field → value equalities, non-empty) |
+| `testInspect({className, where?, limit?, count?})` | reads rows (or a count) of one class with master rights |
+| `testPatch({className, objectId, set})` | sets plain fields on one row with master rights |
+
+Tunables (ceiling per level, rate limit, slot count, blob size, week key), the schema definition and the
+`SETUP_ENABLED` switch live in `cloud/config.js`.
 
 ### Design choices worth knowing
 
@@ -57,7 +68,12 @@ Tunables (ceiling per level, rate limit, slot count, blob size, week key) live i
   "currentVersion":3}')`. Parse errors are (number, string) only, so the string is a JSON envelope.
   `parseCloudError()` in `public/app.js` and `scripts/lib/rest.mjs` unwraps it. Codes: `UNAUTHENTICATED` (209),
   `INVALID_ARGS`, `CEILING_EXCEEDED`, `COUNTER_NOT_MONOTONIC`, `RATE_LIMITED`, `INVALID_SLOT`, `BLOB_TOO_LARGE`,
-  `STALE_SAVE`; direct writes get Parse 119 (`CLOUD_CODE_ONLY` from the hook, or the plain CLP message).
+  `STALE_SAVE`, `SETUP_DISABLED` (119), `SETUP_LOCKED`; direct writes get Parse 119 (`CLOUD_CODE_ONLY` from the
+  hook, or the plain CLP message).
+- **Seeded rows have no player.** `scripts/seed.mjs` without a master key creates `Best` rows through `seedBest`
+  with `player = null` and `seeded = true` (creating 1M `_User` rows from the REST key is not possible and not
+  desirable). `leaderboard` returns `playerId: null, seeded: true` for them; `myRank` counts them like any other
+  row. Real players always have a pointer.
 
 ## What is and is not validated — read this before trusting a leaderboard
 
@@ -89,7 +105,9 @@ is in `AGENTS.md`.
    `.env` (copy `.env.example`; set `SERVER_URL=https://parseapi.back4app.com`). `.env` is gitignored. Never
    give the master key to the web client or to Containers.
 3. **Schema**: `npm run setup` — creates `Player`, `Score`, `Best`, `Save`, `RejectedScore` with fields, CLPs and
-   indexes through the schema REST API; idempotent. It ends with a probe of Cloud Code.
+   indexes; idempotent. With `MASTER_KEY` in `.env` it uses the schema REST API directly; without one it calls the
+   Cloud function `setupSchema` (so deploy Cloud Code, step 4, first — see "Without the master key"). It ends
+   with a probe of Cloud Code.
 4. **Cloud Code** (*manual*): Dashboard → Cloud Code → Upload → `cloud/main.js` **and** `cloud/config.js`
    (`cloud/package.json` is not needed) → Deploy. On a fresh backend the first Deploy has been seen to report
    "Success" while shipping nothing: reload, make the files dirty again, confirm the "Files pending deploy (2)"
@@ -103,28 +121,67 @@ is in `AGENTS.md`.
    ```
    `npm run setup` prints the same verdict as its last line.
 5. **Tie-break index** (*manual check*): Dashboard → Database → `Best` → Indexes. You should see `best_alltime`
-   `{level:1, score:-1, createdAt:1}`, `best_weekly` `{level:1, week:1, weekScore:-1, createdAt:1}` and
-   `best_player_level`. If an index is missing (the schema API on MongoDB creates them asynchronously), create
-   it there with exactly those keys; the leaderboard sort and `myRank` count rely on them at scale.
-6. **Smoke test**: `npm test` can be pointed at Back4app (`SERVER_URL` in `.env`); it creates throw-away
-   anonymous users and 500 `Best` rows on level 77. Do that on a staging app, not where real players live.
-7. **Web client**: push the repo to GitHub, then Containers → Deploy a web app → GitHub repository → *Build &
+   `{level:1, score:-1, createdAt:1}`, `best_weekly` `{level:1, week:1, weekScore:-1, createdAt:1}`,
+   `best_player_level` and `best_seedKey`. If an index is missing (the schema API on MongoDB creates them
+   asynchronously), create it there with exactly those keys; the leaderboard sort and `myRank` count rely on
+   them at scale.
+6. **Smoke test**: `TEST_SERVER_URL=https://parseapi.back4app.com npm test` points the suite at Back4app without
+   touching the master key; it creates throw-away anonymous users and 500 `Best` rows on level 77. Do that on a
+   staging app, not where real players live.
+7. **Disable the setup helpers** (*manual*, before players arrive): in `cloud/config.js` set
+   `SETUP_ENABLED = false`, upload `config.js` again, Deploy, and prove it:
+
+   ```text
+   $ curl -s -X POST https://parseapi.back4app.com/functions/setupSchema \
+       -H "X-Parse-Application-Id: $APP_ID" -H "X-Parse-REST-API-Key: $REST_KEY" -H "Content-Type: application/json" -d '{}'
+   {"code":119,"error":"{\"code\":\"SETUP_DISABLED\",...}"}   ← done
+   ```
+   Keep the flag in the repo at `true` only if the repo is for a staging app; the committed default is `true`
+   because a fresh app needs it for steps 3 and 6.
+8. **Web client**: push the repo to GitHub, then Containers → Deploy a web app → GitHub repository → *Build &
    run* → **Node.js Buildpack** → Port `8080`, Health check `/healthz` → env vars `APP_ID`, `JS_KEY`,
    `SERVER_URL=https://parseapi.back4app.com` → Create app. `curl https://<app>.b4a.run/healthz` →
    `{"ok":true,…}`. The buildpack installs devDependencies (parse-server) during the build; set
    `NPM_CONFIG_PRODUCTION=true` to skip them.
 
+### Without the master key (agent / CI path)
+
+On Back4app the master key is shown in the dashboard and nowhere else; an agent or a CI job typically has only
+`APP_ID`, `JS_KEY`, `REST_KEY` and `SERVER_URL`. Everything privileged then runs **inside Cloud Code**, which has
+master rights, through the setup helpers listed above. Leave `MASTER_KEY` empty in `.env` and the scripts switch
+over by themselves:
+
+```text
+# Cloud Code deployed (step 4) with SETUP_ENABLED = true, .env without MASTER_KEY
+npm run setup                                   # → setupSchema; add -- --allow-rerun once Best has rows
+npm run seed -- --n 1000000 --levels 1          # → seedBest, 50 rows per call: 20,000 requests ≈ 21 min at 16 req/s
+npm run bench -- --level 1 --label back4app     # leaderboard + myRank with the REST key and a guest session
+TEST_SERVER_URL=https://parseapi.back4app.com npm test   # suite via testReset / testInspect / testPatch
+# then: SETUP_ENABLED = false in cloud/config.js, upload, Deploy, curl → SETUP_DISABLED (step 7)
+```
+
+What differs from the master-key path: seeded `Best` rows have `player = null` (no `_User`, no `_Session`),
+re-running the seed skips rows whose `seedKey` (`seed-<seed>-<i>:<level>`) exists, and one test (`master key can
+write Score/Best`) is skipped. Do not mix the two seed paths on one app: the master-key seed has no `seedKey`, so
+the Cloud path would add a second row per player. While `SETUP_ENABLED` is true, **anyone with the App ID can
+create `Best` rows, read every row of every class and delete rows** — it is a setup tool for the window between
+"app created" and "players arrive", not a feature.
+
 ### Live benchmark (optional)
 
 ```text
-npm run seed -- --n 1000000 --levels 1        # ≈ 40k batched requests at 16 req/s ≈ 42 min; resumable with --from
+npm run seed -- --n 1000000 --levels 1        # resumable with --from; ≈ 42 min with the master key (users + bests, ≈ 40k requests),
+                                              # ≈ 21 min without it (seedBest, 20,000 requests), both at 16 req/s
 npm run bench -- --level 1 --label back4app   # top-100 and myRank, all-time and weekly, 20 warm-ups + 100 runs
 ```
 
-The seeder creates one anonymous `_User` (username `seed-<seed>-<i>`) and one `Best` row per level per player,
-deterministically from `--seed`; it retries Back4app's throttle (HTTP 400, Parse code 155). Each seeded sign-up
-also leaves one `_Session` row (Parse creates a session for every sign-up). Results land in `docs/evidence/`
-(gitignored CSVs; commit the ones you want to publish).
+The seeder is deterministic from `--seed` and retries Back4app's throttle (HTTP 400, Parse code 155). With the
+master key it creates one anonymous `_User` (username `seed-<seed>-<i>`, plus the `_Session` row Parse creates
+for every sign-up) and one `Best` row per level per player; without it, `Best` rows only (see above). The
+benchmark signs in as seeded player `--player` through its deterministic anonymous id; when that player has no
+`Best` row on the level (Cloud path, or a fresh id) it submits the score the seed assigned to it first, so
+`myRank` measures the same position either way. Results land in `docs/evidence/` (gitignored CSVs; commit the
+ones you want to publish).
 
 ## Local development
 
@@ -139,7 +196,11 @@ npm run setup                   # schema, CLPs, indexes
 npm test                        # node:test; starts the dev server itself if nothing answers at SERVER_URL
 npm run seed && npm run bench   # 1000 players × 3 levels, then latency CSVs
 npm run dev:web                 # Express on :8080 serving public/ and /config.js
+MASTER_KEY= npm test            # same suite through the Cloud Code setup helpers (dev server already running)
 ```
+
+The local server needs `MASTER_KEY` to start; `setup`, `seed`, `bench` and the tests do not (they fall back to
+the setup helpers). `MASTER_KEY= <command>` exercises the no-master-key path against the running dev server.
 
 If another Parse Server already uses the port, change `PARSE_PORT` and `SERVER_URL` in `.env`; the test runner
 refuses to run against a server that rejects your keys.
@@ -176,12 +237,16 @@ The local server exists to run the tests fast; Back4app runs MongoDB, and a few 
 - `leaderboard` returns at most 100 rows; `myRank` is a count, which is O(rows above you).
 - `Best` is public: anyone can list every player's best scores and display names. Do not put private data in
   `displayName`.
+- The setup helpers (`setupSchema`, `seedBest`, `testReset`, `testInspect`, `testPatch`) are unauthenticated
+  while `SETUP_ENABLED` is true. The `SETUP_LOCKED` tripwire in `setupSchema` is a courtesy, not a boundary:
+  anyone can pass `allowRerun: true`. Disabling the flag and redeploying is the only switch that counts.
 - Nothing here backs up data off-platform.
 
 ## Repository map
 
 ```text
-cloud/main.js, cloud/config.js   Cloud Code (upload both)            scripts/setup.mjs      schema, CLPs, indexes (REST, master key)
+cloud/main.js, cloud/config.js   Cloud Code (upload both); config.js  scripts/setup.mjs      schema, CLPs, indexes (master key → REST,
+                                 holds the schema and SETUP_ENABLED                           otherwise Cloud function setupSchema)
 scripts/dev-server.mjs           local parse-server 7 + Postgres      scripts/seed.mjs       deterministic players/bests, throttle-aware
 scripts/run-tests.mjs            `npm test` orchestration             scripts/bench.mjs      latency CSVs → docs/evidence/
 test/*.test.mjs                  node:test suites (REST only)         public/                demo client (Parse JS SDK from CDN)

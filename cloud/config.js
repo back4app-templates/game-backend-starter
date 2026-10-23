@@ -1,5 +1,6 @@
 // File: cloud/config.js · CommonJS · Parse Server 7.x (Back4app: Node 19 — no Node 20+ only features here)
-// Tunables shared by cloud/main.js, the scripts and the tests. Upload this file together with main.js.
+// Tunables, the schema definition and the SETUP_ENABLED switch, shared by cloud/main.js, the scripts and the
+// tests. Upload this file together with main.js.
 'use strict';
 
 // Highest level the game has. submitScore rejects levels outside 1..MAX_LEVEL.
@@ -44,7 +45,138 @@ function weekKey(date) {
 }
 const WEEK_KEY_RE = /^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/;
 
+// ---------------------------------------------------------------------------------------------------------
+// Setup helpers (setupSchema, seedBest, testReset, testInspect, testPatch in cloud/main.js)
+// ---------------------------------------------------------------------------------------------------------
+// These Cloud functions run with the master key on behalf of an UNAUTHENTICATED caller, so that a fresh
+// Back4app app can be set up, seeded and tested with the REST key only (the master key never leaves the
+// dashboard). They exist for the window between "app created" and "players arrive".
+//
+//   >>> Before you publish the game: set SETUP_ENABLED = false, upload config.js again and Deploy. <<<
+//
+// With SETUP_ENABLED=false every one of them answers SETUP_DISABLED and nothing else changes. Keep it true on a
+// staging app you run the test suite against. While it is true, anyone with the App ID can create Best rows,
+// read every row of every class and delete rows: it is a setup tool, not a feature.
+const SETUP_ENABLED = true;
+
+// seedBest accepts at most this many rows per call (the REST /batch limit, so one call = one request).
+const SEED_BATCH_MAX = 50;
+
+// The schema setupSchema (Cloud Code) and scripts/setup.mjs (REST, master key) apply: fields, class-level
+// permissions, indexes. One definition for the local parse-server (Postgres) and for Back4app (MongoDB).
+const CLP_MASTER_ONLY = {};                      // nobody but the master key
+const CLP_PUBLIC = { '*': true };                // anyone, including unauthenticated
+const CLP_AUTHENTICATED = { requiresAuthentication: true };
+const pointerToUser = { type: 'Pointer', targetClass: '_User' };
+
+const SCHEMA = [
+  {
+    className: 'Player',
+    why: 'profile + anti-abuse counters; owner read via ACL, writes via Cloud Code',
+    fields: {
+      user: pointerToUser,
+      displayName: { type: 'String' },
+      country: { type: 'String' },
+      lastSessionCounter: { type: 'Number' },
+      submitWindowStart: { type: 'Date' },
+      submitCount: { type: 'Number' },
+    },
+    classLevelPermissions: {
+      find: CLP_AUTHENTICATED, get: CLP_AUTHENTICATED, count: CLP_MASTER_ONLY,
+      create: CLP_MASTER_ONLY, update: CLP_MASTER_ONLY, delete: CLP_MASTER_ONLY, addField: CLP_MASTER_ONLY,
+      protectedFields: { '*': ['submitWindowStart', 'submitCount'] },
+    },
+    indexes: {
+      player_user: { user: 1 },
+    },
+  },
+  {
+    className: 'Score',
+    why: 'per-submission history; owner read via ACL',
+    fields: {
+      player: pointerToUser,
+      playerName: { type: 'String' },
+      level: { type: 'Number' },
+      score: { type: 'Number' },
+      week: { type: 'String' },
+      sessionCounter: { type: 'Number' },
+      clientNonce: { type: 'String' },
+    },
+    classLevelPermissions: {
+      find: CLP_AUTHENTICATED, get: CLP_AUTHENTICATED, count: CLP_MASTER_ONLY,
+      create: CLP_MASTER_ONLY, update: CLP_MASTER_ONLY, delete: CLP_MASTER_ONLY, addField: CLP_MASTER_ONLY,
+    },
+    indexes: {
+      score_player_createdAt: { player: 1, createdAt: -1 },
+      score_player_nonce: { player: 1, clientNonce: 1 }, // replay lookup in submitScore
+    },
+  },
+  {
+    className: 'Best',
+    why: 'one row per player+level; the leaderboards read this class only. Public read: scores are public.',
+    fields: {
+      player: pointerToUser,          // null on rows created by seedBest (synthetic benchmark data)
+      playerName: { type: 'String' },
+      level: { type: 'Number' },
+      score: { type: 'Number' },      // all-time best
+      week: { type: 'String' },       // week of the most recent submission
+      weekScore: { type: 'Number' },  // best within `week`
+      seeded: { type: 'Boolean' },    // true on rows created by seedBest
+      seedKey: { type: 'String' },    // caller-supplied unique key of a seeded row (lets seedBest skip duplicates)
+    },
+    classLevelPermissions: {
+      find: CLP_PUBLIC, get: CLP_PUBLIC, count: CLP_PUBLIC,
+      create: CLP_MASTER_ONLY, update: CLP_MASTER_ONLY, delete: CLP_MASTER_ONLY, addField: CLP_MASTER_ONLY,
+    },
+    indexes: {
+      best_alltime: { level: 1, score: -1, createdAt: 1 },
+      best_weekly: { level: 1, week: 1, weekScore: -1, createdAt: 1 },
+      best_player_level: { player: 1, level: 1 },
+      best_seedKey: { seedKey: 1 },
+    },
+  },
+  {
+    className: 'Save',
+    why: 'cloud saves, 3 slots per player; owner read via ACL, optimistic version',
+    fields: {
+      player: pointerToUser,
+      slot: { type: 'Number' },
+      version: { type: 'Number' },
+      blob: { type: 'String' },
+      bytes: { type: 'Number' },
+    },
+    classLevelPermissions: {
+      find: CLP_AUTHENTICATED, get: CLP_AUTHENTICATED, count: CLP_MASTER_ONLY,
+      create: CLP_MASTER_ONLY, update: CLP_MASTER_ONLY, delete: CLP_MASTER_ONLY, addField: CLP_MASTER_ONLY,
+    },
+    indexes: {
+      save_player_slot: { player: 1, slot: 1 },
+    },
+  },
+  {
+    className: 'RejectedScore',
+    why: 'audit log of rejected submissions; master key only',
+    fields: {
+      player: pointerToUser,
+      reason: { type: 'String' },
+      level: { type: 'Number' },
+      score: { type: 'Number' },
+      sessionCounter: { type: 'Number' },
+    },
+    classLevelPermissions: {
+      find: CLP_MASTER_ONLY, get: CLP_MASTER_ONLY, count: CLP_MASTER_ONLY,
+      create: CLP_MASTER_ONLY, update: CLP_MASTER_ONLY, delete: CLP_MASTER_ONLY, addField: CLP_MASTER_ONLY,
+    },
+    indexes: {
+      rejected_player_createdAt: { player: 1, createdAt: -1 },
+    },
+  },
+];
+
 module.exports = {
+  SETUP_ENABLED,
+  SEED_BATCH_MAX,
+  SCHEMA,
   MAX_LEVEL,
   ceilingForLevel,
   RATE_LIMIT,

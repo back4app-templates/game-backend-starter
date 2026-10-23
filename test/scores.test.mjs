@@ -1,7 +1,7 @@
 // Scores and leaderboards: ceiling, counter monotonicity, rate limit, replay, ties and rank.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { guest, call, nonce, submitMany, master, userPointer, config, api } from './helpers.mjs';
+import { guest, call, nonce, submitMany, master, userPointer, config, seedBest } from './helpers.mjs';
 
 test('submitScore rejects a score above the level ceiling and logs it', async () => {
   const u = await guest();
@@ -120,23 +120,12 @@ test('ties share a rank: leaderboard and myRank agree with a brute-force ranking
   const LEVEL = 77; // dedicated level, reset before the test
   await master.purge('Best', { level: LEVEL });
 
-  // 500 rows: players are real _Users; 50 distinct scores × 10 players each, so the top-100 spans ten tie groups;
-  // written with the master key straight into Best (the hooks allow master writes), as scripts/seed.mjs does.
+  // 500 rows: 50 distinct scores × 10 players each, so the top-100 spans ten tie groups; written through the
+  // Cloud function seedBest (player = null, seeded = true), as scripts/seed.mjs does without a master key.
   const scores = Array.from({ length: 500 }, (_, i) => 1000 + (i % 50) * 10);
-  const users = [];
-  for (let i = 0; i < 500; i += 50) {
-    const r = await api.batch(Array.from({ length: 50 }, (_, j) => ({ method: 'POST', path: '/users', body: { authData: { anonymous: { id: `tie-${Date.now()}-${i + j}-${Math.random().toString(36).slice(2)}` } } } })), { master: true });
-    assert.equal(r.status, 200, JSON.stringify(r.json).slice(0, 300));
-    for (const item of r.json) { assert.ok(item.success, JSON.stringify(item)); users.push(item.success.objectId); }
-  }
-  for (let i = 0; i < 500; i += 50) {
-    const r = await api.batch(users.slice(i, i + 50).map((id, j) => ({
-      method: 'POST', path: '/classes/Best',
-      body: { player: userPointer(id), playerName: `tie-${i + j}`, level: LEVEL, score: scores[i + j], week: config.weekKey(new Date()), weekScore: scores[i + j], ACL: { '*': { read: true } } },
-    })), { master: true });
-    assert.equal(r.status, 200);
-    for (const item of r.json) assert.ok(item.success, JSON.stringify(item));
-  }
+  const week = config.weekKey(new Date());
+  const seeded = await seedBest(scores.map((score, i) => ({ playerName: `tie-${i}`, level: LEVEL, score, week, weekScore: score })));
+  assert.equal(seeded.created, 500);
 
   // Brute force: rank = 1 + number of strictly greater scores.
   const expectedRank = (s) => 1 + scores.filter((x) => x > s).length;
@@ -153,6 +142,7 @@ test('ties share a rank: leaderboard and myRank agree with a brute-force ranking
     }
   }
   assert.deepEqual(top.result.entries.slice(0, 11).map((e) => e.rank), [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 11]);
+  assert.ok(top.result.entries.every((e) => e.playerId === null && e.seeded === true), 'seeded rows carry no player pointer');
   assert.equal(top.result.entries[99].rank, 91);
   assert.equal(top.result.entries[99].score, 1400);
 
@@ -172,4 +162,6 @@ test('ties share a rank: leaderboard and myRank agree with a brute-force ranking
   }
   const total = await master.count('Best', { level: LEVEL });
   assert.equal(total, 501);
+  const mine = await call('leaderboard', { level: LEVEL, scope: 'alltime', limit: 100 }, me.session);
+  assert.equal(mine.result.entries.filter((e) => e.playerId === me.id).length, 0, 'score 5 is not in the top-100');
 });

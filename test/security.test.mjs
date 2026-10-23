@@ -1,7 +1,7 @@
 // Raw REST security: nothing in the client can write Score/Best/Save/Player directly or read another player's data.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { api, guest, call, nonce, master, userPointer } from './helpers.mjs';
+import { api, guest, call, nonce, master, userPointer, hasMasterKey } from './helpers.mjs';
 
 test('direct POST /classes/Score with a session token is denied', async () => {
   const u = await guest();
@@ -82,7 +82,7 @@ test('unauthenticated calls to player functions are denied; leaderboard is publi
   assert.equal(newClass.json.code, 119, 'allowClientClassCreation=false: ' + JSON.stringify(newClass.json));
 });
 
-test('master key can write Score/Best (the hooks allow master writes, which is how Cloud Code works)', async () => {
+test('master key can write Score/Best (the hooks allow master writes, which is how Cloud Code works)', { skip: !hasMasterKey && 'no MASTER_KEY (remote run)' }, async () => {
   const u = await guest();
   const r = await api.request('POST', '/classes/Score', { master: true, body: { player: userPointer(u.id), level: 1, score: 1, week: '2026-W01', playerName: 'm', sessionCounter: 0, clientNonce: 'master-' + Date.now() } });
   assert.equal(r.status, 201, JSON.stringify(r.json));

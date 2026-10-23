@@ -1,6 +1,6 @@
 {
   "name": "game-backend-starter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Player accounts, leaderboards and cloud saves for a game on a general backend-as-a-service (Back4app / Parse Server). Companion repository for the blog article.",
   "license": "MIT",

@@ -1,6 +1,6 @@
 // File: scripts/bench.mjs · Node 22 ESM
 // Latency of the two leaderboard reads as a client sees them: leaderboard (top-100) and myRank, all-time and
-// weekly. 20 warm-ups then 100 timed runs per operation; p50/p95/min/max/mean to docs/evidence/bench-<ts>.csv
+// weekly. REST key only (no master key needed). 20 warm-ups then 100 timed runs per operation; p50/p95/min/max/mean to docs/evidence/bench-<ts>.csv
 // (summary) and bench-<ts>-samples.csv (every run). myRank runs as seeded player --player (default 0), signed
 // in through its deterministic anonymous id (same --seed as the seed script).
 //
@@ -22,7 +22,13 @@ const env = loadEnv();
 const api = makeClient(env, { retry: true });
 const label = args.label || new URL(env.SERVER_URL).hostname;
 
-// Sign in as a seeded player (POST /users with an existing anonymous id logs that user in).
+// Needs the REST key only: anonymous sign-in (public), leaderboard (public) and myRank (session) are the
+// whole surface; nothing here queries a class directly.
+//
+// Sign in as seeded player --player (POST /users with an existing anonymous id logs that user in; with an
+// unknown id it creates a fresh guest). When the player has no Best row on this level — the seed ran through
+// seedBest (rows carry no _User) or the id is new — submit the score the seed assigned to that player, so
+// myRank measures the same position either way.
 const me = seededPlayer(playerIndex, seed, level);
 const login = await api.request('POST', '/users', { body: { authData: { anonymous: { id: me.anonymousId } } } });
 if (login.status !== 200 && login.status !== 201) {
@@ -30,7 +36,21 @@ if (login.status !== 200 && login.status !== 201) {
   process.exit(1);
 }
 const session = login.json.sessionToken;
-console.log(`target ${env.SERVER_URL} · level ${level} · as ${login.json.username || login.json.objectId} · ${warmup} warm-ups + ${runs} runs`);
+const have = await api.call('myRank', { level, scope: 'alltime' }, { session });
+if (!have.ok) {
+  console.error(`myRank failed: ${JSON.stringify(have.error)}${/Invalid function/.test(have.error.message || '') ? ' — Cloud Code not deployed' : ''}`);
+  process.exit(1);
+}
+let position = `rank ${have.result.rank}`;
+if (have.result.rank === null) {
+  const profile = await api.call('ensurePlayer', { displayName: me.username.slice(0, 24) }, { session });
+  if (!profile.ok) { console.error(`ensurePlayer failed: ${JSON.stringify(profile.error)}`); process.exit(1); }
+  const myScore = me.scores.find((s) => s.level === level).score;
+  const sub = await api.call('submitScore', { level, score: myScore, sessionCounter: profile.result.lastSessionCounter + 1, clientNonce: `bench-${Date.now()}` }, { session });
+  if (!sub.ok) { console.error(`submitScore failed: ${JSON.stringify(sub.error)}`); process.exit(1); }
+  position = `submitted the seeded score ${myScore} (no Best row yet)`;
+}
+console.log(`target ${env.SERVER_URL} · level ${level} · as ${login.json.username || login.json.objectId} (${position}) · ${warmup} warm-ups + ${runs} runs`);
 
 const ops = [
   ['leaderboard_alltime_top' + limit, () => api.call('leaderboard', { level, scope: 'alltime', limit })],

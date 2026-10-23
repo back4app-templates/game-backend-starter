@@ -2,7 +2,10 @@
 //
 // Everything that writes to Player, Score, Best, Save or RejectedScore goes through the functions below,
 // which run with the master key. The beforeSave/beforeDelete hooks at the bottom reject every non-master
-// write, and the class-level permissions created by scripts/setup.mjs close create/update/delete to clients.
+// write, and the class-level permissions (section 4, also scripts/setup.mjs) close create/update/delete to
+// clients. Section 4 also holds the setup helpers (setupSchema, seedBest, testReset, testInspect, testPatch):
+// unauthenticated functions, gated by config.SETUP_ENABLED, for a fresh app whose master key is not available
+// to the scripts. Set SETUP_ENABLED = false in config.js and redeploy before the game goes public.
 //
 // Error convention: functions throw Parse.Error with a numeric Parse code and a JSON string message
 // {"code":"STALE_SAVE","message":"…", …extra}. Parse.Error only carries (number, string), so the string is
@@ -371,7 +374,7 @@ Parse.Cloud.define('leaderboard', async (request) => {
   q.descending(field);
   q.addAscending('createdAt');
   q.limit(limit);
-  q.select('player', 'playerName', 'level', 'score', 'week', 'weekScore');
+  q.select('player', 'playerName', 'level', 'score', 'week', 'weekScore', 'seeded');
   const rows = await q.find(MASTER);
 
   const entries = [];
@@ -383,12 +386,14 @@ Parse.Cloud.define('leaderboard', async (request) => {
       rank = i + 1;
       prevScore = s;
     }
+    const player = row.get('player'); // null on rows created by seedBest (synthetic benchmark data)
     entries.push({
       rank: rank,
-      playerId: row.get('player').id,
+      playerId: player ? player.id : null,
       playerName: row.get('playerName'),
       score: s,
       since: iso(row.createdAt),
+      seeded: !!row.get('seeded'),
     });
   });
   return { level: level, scope: scope, week: week, limit: limit, entries: entries };
@@ -485,7 +490,235 @@ Parse.Cloud.define('getSave', async (request) => {
 });
 
 // ---------------------------------------------------------------------------------------------------------
-// 4. Security: nothing in the client writes these classes directly
+// 4. Setup helpers: schema, synthetic seed, test access — all behind config.SETUP_ENABLED
+// ---------------------------------------------------------------------------------------------------------
+// Why they exist: on Back4app the master key lives in the dashboard; an agent or a CI job that only has the
+// REST key cannot create classes, cannot seed Best rows (writes are Cloud-Code-only) and cannot inspect the
+// master-only state the tests assert on. Cloud Code runs with master rights, so these functions do it on the
+// caller's behalf. Nothing authenticates the caller: that is what SETUP_ENABLED is for. Flip it to false,
+// upload config.js again, Deploy, and verify with a call (expect SETUP_DISABLED) before players arrive.
+
+function requireSetupEnabled() {
+  if (!config.SETUP_ENABLED) {
+    fail('SETUP_DISABLED', 'Setup helpers are disabled (cloud/config.js SETUP_ENABLED = false).', null, PE.OPERATION_FORBIDDEN);
+  }
+}
+
+const SETUP_CLASSES = config.SCHEMA.map((def) => def.className);
+
+function requireSetupClass(className) {
+  if (SETUP_CLASSES.indexOf(className) === -1) {
+    fail('INVALID_ARGS', 'className must be one of ' + SETUP_CLASSES.join(', '), { field: 'className' });
+  }
+  return className;
+}
+
+function requireWhere(where) {
+  if (!where || typeof where !== 'object' || Array.isArray(where) || !Object.keys(where).length) {
+    fail('INVALID_ARGS', 'where must be a non-empty object of field → value equalities', { field: 'where' });
+  }
+  return where;
+}
+
+// A Parse.Query from a `where` object of field → value equalities (values REST-encoded: a pointer is
+// {__type:'Pointer', className, objectId}, a date {__type:'Date', iso}). Operators ($gt, $in, …) are not
+// accepted: the suite only needs equality, and decoding the values here keeps the Postgres adapter happy.
+function queryFromWhere(className, where) {
+  const q = new Parse.Query(className);
+  Object.keys(where).forEach((key) => {
+    const value = decodeParam(where[key]);
+    if (value && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Parse.Object) && !(value instanceof Date)) {
+      fail('INVALID_ARGS', 'where.' + key + ' must be a plain value or a REST-encoded pointer/date (no operators)', { field: 'where.' + key });
+    }
+    q.equalTo(key, value);
+  });
+  return q;
+}
+
+// Parse Server may hand Cloud functions their params already decoded (pointers as Parse.Object when
+// encodeParseObjectInCloudFunction is on, as on the local server) or raw (REST JSON, as on Back4app).
+function decodeParam(value) {
+  if (value instanceof Parse.Object || value instanceof Date) return value;
+  return Parse._decode(null, value);
+}
+
+async function fetchSchema(className) {
+  try {
+    return await new Parse.Schema(className).get();
+  } catch (e) {
+    if (e && e.code === PE.INVALID_CLASS_NAME) return null; // 103: class does not exist
+    throw e;
+  }
+}
+
+function addFieldsTo(schema, fields) {
+  Object.keys(fields).forEach((name) => {
+    const spec = fields[name];
+    if (spec.type === 'Pointer') schema.addPointer(name, spec.targetClass);
+    else schema.addField(name, spec.type);
+  });
+}
+
+// setupSchema({allowRerun?}) → {classes: [{className, action, newFields, newIndexes}], bestCount}
+//   Creates the five classes with fields, class-level permissions and indexes, or brings existing ones up to
+//   date: missing fields and missing indexes are added, CLPs are always re-applied, nothing is removed.
+//   Idempotent. Parse.Schema indexes are plain (non-unique), as in scripts/setup.mjs.
+//   Tripwire: refuses once Best holds 2 or more rows unless params.allowRerun === true, so a stray call on an
+//   app that already has data is noisy rather than silent. It is not a security boundary: SETUP_ENABLED is.
+Parse.Cloud.define('setupSchema', async (request) => {
+  requireSetupEnabled();
+  const p = request.params || {};
+  const bestCount = (await fetchSchema('Best')) ? await new Parse.Query('Best').count(MASTER) : 0;
+  if (bestCount >= 2 && p.allowRerun !== true) {
+    fail('SETUP_LOCKED', 'Best already holds ' + bestCount + ' rows; pass {allowRerun: true} to re-apply the schema.', { bestCount: bestCount });
+  }
+
+  const classes = [];
+  for (const def of config.SCHEMA) {
+    const have = await fetchSchema(def.className);
+    const schema = new Parse.Schema(def.className);
+    schema.setCLP(def.classLevelPermissions);
+    if (!have) {
+      addFieldsTo(schema, def.fields);
+      Object.keys(def.indexes || {}).forEach((name) => schema.addIndex(name, def.indexes[name]));
+      await schema.save();
+      classes.push({ className: def.className, action: 'created', newFields: Object.keys(def.fields), newIndexes: Object.keys(def.indexes || {}) });
+      continue;
+    }
+    const newFields = {};
+    Object.keys(def.fields).forEach((name) => { if (!have.fields || !have.fields[name]) newFields[name] = def.fields[name]; });
+    const haveIdx = have.indexes || {};
+    const newIndexes = Object.keys(def.indexes || {}).filter((name) => !haveIdx[name]);
+    addFieldsTo(schema, newFields);
+    newIndexes.forEach((name) => schema.addIndex(name, def.indexes[name]));
+    await schema.update();
+    classes.push({ className: def.className, action: 'updated', newFields: Object.keys(newFields), newIndexes: newIndexes });
+  }
+
+  // What the server believes it has now (Back4app: compare with Dashboard → Database → Indexes).
+  const indexes = {};
+  for (const def of config.SCHEMA) {
+    const now = await fetchSchema(def.className);
+    indexes[def.className] = (now && now.indexes) || {};
+  }
+  return { classes: classes, indexes: indexes, bestCount: bestCount };
+});
+
+// seedBest({rows}) → {created, skipped}
+//   rows: up to SEED_BATCH_MAX objects {playerName, level, score, week, weekScore, seedKey?}. Creates one public
+//   Best row each with player = null and seeded = true: synthetic leaderboard data for the benchmark, no
+//   _User and no _Session per row. Rows whose seedKey already exists are skipped (re-runs are idempotent).
+//   Budget: 1,000,000 rows / 50 per call = 20,000 requests (≈ 21 min at 16 req/s).
+Parse.Cloud.define('seedBest', async (request) => {
+  requireSetupEnabled();
+  const p = request.params || {};
+  const rows = p.rows;
+  if (!Array.isArray(rows) || rows.length < 1 || rows.length > config.SEED_BATCH_MAX) {
+    fail('INVALID_ARGS', 'rows must be an array of 1..' + config.SEED_BATCH_MAX + ' objects', { field: 'rows', max: config.SEED_BATCH_MAX });
+  }
+  const seedKeys = [];
+  rows.forEach((row, i) => {
+    const at = 'rows[' + i + ']';
+    if (!row || typeof row !== 'object') fail('INVALID_ARGS', at + ' must be an object', { field: at });
+    if (typeof row.playerName !== 'string' || !row.playerName.length || row.playerName.length > 64) fail('INVALID_ARGS', at + '.playerName must be a string of 1..64 characters', { field: at + '.playerName' });
+    requireLevel(row.level);
+    const ceiling = config.ceilingForLevel(row.level);
+    if (!isInt(row.score) || row.score < 0 || row.score > ceiling) fail('INVALID_ARGS', at + '.score must be an integer in 0..' + ceiling, { field: at + '.score' });
+    if (typeof row.week !== 'string' || !config.WEEK_KEY_RE.test(row.week)) fail('INVALID_ARGS', at + '.week must look like 2026-W43', { field: at + '.week' });
+    if (!isInt(row.weekScore) || row.weekScore < 0 || row.weekScore > row.score) fail('INVALID_ARGS', at + '.weekScore must be an integer in 0..score', { field: at + '.weekScore' });
+    if (row.seedKey !== undefined) {
+      if (typeof row.seedKey !== 'string' || !row.seedKey.length || row.seedKey.length > 128) fail('INVALID_ARGS', at + '.seedKey must be a string of 1..128 characters', { field: at + '.seedKey' });
+      seedKeys.push(row.seedKey);
+    }
+  });
+
+  let existing = {};
+  if (seedKeys.length) {
+    const q = new Parse.Query('Best');
+    q.containedIn('seedKey', seedKeys);
+    q.select('seedKey');
+    q.limit(seedKeys.length);
+    (await q.find(MASTER)).forEach((b) => { existing[b.get('seedKey')] = true; });
+  }
+
+  const objects = [];
+  let skipped = 0;
+  rows.forEach((row) => {
+    if (row.seedKey !== undefined && existing[row.seedKey]) { skipped++; return; }
+    const best = new Parse.Object('Best');
+    best.set('playerName', row.playerName);
+    best.set('level', row.level);
+    best.set('score', row.score);
+    best.set('week', row.week);
+    best.set('weekScore', row.weekScore);
+    best.set('seeded', true);
+    if (row.seedKey !== undefined) best.set('seedKey', row.seedKey);
+    best.setACL(publicReadAcl());
+    objects.push(best);
+  });
+  if (objects.length) await Parse.Object.saveAll(objects, MASTER);
+  return { created: objects.length, skipped: skipped };
+});
+
+// testReset({className, where}) → {deleted}. Deletes every row of one of the five classes matching `where`
+// (field → value equalities, must be non-empty). The suite uses it to clear a level before seeding it.
+Parse.Cloud.define('testReset', async (request) => {
+  requireSetupEnabled();
+  const p = request.params || {};
+  const className = requireSetupClass(p.className);
+  const where = requireWhere(p.where);
+  let deleted = 0;
+  for (;;) {
+    const q = queryFromWhere(className, where);
+    q.select('objectId');
+    q.limit(1000);
+    const rows = await q.find(MASTER);
+    if (!rows.length) break;
+    await Parse.Object.destroyAll(rows, MASTER);
+    deleted += rows.length;
+  }
+  return { className: className, deleted: deleted };
+});
+
+// testInspect({className, where, limit?, count?}) → {results} or {count}. Reads rows of one of the five
+// classes with master rights (RejectedScore, other players' Player/Save, hidden Player counters). Rows come
+// back as plain JSON (toJSON), Dates as {__type:'Date', iso}.
+Parse.Cloud.define('testInspect', async (request) => {
+  requireSetupEnabled();
+  const p = request.params || {};
+  const className = requireSetupClass(p.className);
+  const where = p.where === undefined ? {} : p.where;
+  if (!where || typeof where !== 'object' || Array.isArray(where)) fail('INVALID_ARGS', 'where must be an object', { field: 'where' });
+  const q = queryFromWhere(className, where);
+  if (p.count === true) return { className: className, count: await q.count(MASTER) };
+  const limit = p.limit === undefined ? 100 : p.limit;
+  if (!isInt(limit) || limit < 1 || limit > 1000) fail('INVALID_ARGS', 'limit must be an integer in 1..1000', { field: 'limit' });
+  q.limit(limit);
+  q.ascending('createdAt');
+  const rows = await q.find(MASTER);
+  return { className: className, results: rows.map((r) => r.toJSON()) };
+});
+
+// testPatch({className, objectId, set}) → {objectId, updatedAt}. Sets plain fields on one row with master
+// rights: the suite rewinds Player.submitWindowStart to expire a rate-limit window without sleeping 60 s and
+// stamps a Best row with an old week. `set` values use REST encoding ({__type:'Date', iso} for dates).
+Parse.Cloud.define('testPatch', async (request) => {
+  requireSetupEnabled();
+  const p = request.params || {};
+  const className = requireSetupClass(p.className);
+  if (typeof p.objectId !== 'string' || !p.objectId.length) fail('INVALID_ARGS', 'objectId must be a string', { field: 'objectId' });
+  if (!p.set || typeof p.set !== 'object' || Array.isArray(p.set) || !Object.keys(p.set).length) fail('INVALID_ARGS', 'set must be a non-empty object', { field: 'set' });
+  const forbidden = ['objectId', 'createdAt', 'updatedAt', 'ACL'];
+  Object.keys(p.set).forEach((k) => { if (forbidden.indexOf(k) !== -1) fail('INVALID_ARGS', k + ' cannot be set', { field: 'set.' + k }); });
+  const obj = new Parse.Object(className);
+  obj.id = p.objectId;
+  Object.keys(p.set).forEach((k) => obj.set(k, decodeParam(p.set[k])));
+  await obj.save(null, MASTER);
+  return { className: className, objectId: obj.id, updatedAt: iso(obj.updatedAt) };
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// 5. Security: nothing in the client writes these classes directly
 // ---------------------------------------------------------------------------------------------------------
 
 ['Player', 'Score', 'Best', 'Save', 'RejectedScore'].forEach((className) => {

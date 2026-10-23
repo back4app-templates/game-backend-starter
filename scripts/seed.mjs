@@ -1,14 +1,19 @@
 // File: scripts/seed.mjs · Node 22 ESM
-// Seeds N players (anonymous _Users) and one Best row per player for each of --levels levels, deterministically
-// from --seed. Writes go through /batch with the master key at --rps requests/second (token bucket) and retry on
-// Back4app's throttle (HTTP 400, Parse code 155). Resume an interrupted run with --from <players done>.
+// Seeds N players × --levels Best rows, deterministically from --seed, at --rps requests/second (token bucket)
+// with retry on Back4app's throttle (HTTP 400, Parse code 155). Resume an interrupted run with --from <players done>.
 //
 //   npm run seed                              # 1000 players × 3 levels, seed 42
-//   npm run seed -- --n 1000000 --levels 1    # the live benchmark set (≈ 40k requests ≈ 42 min at 16 rps)
+//   npm run seed -- --n 1000000 --levels 1    # the live benchmark set
 //
-// Each seeded sign-up also creates one _Session row (Parse does that for every sign-up, master key or not).
-// Seeded users have usernames seed-<seed>-<i>; their anonymous ids come from the PRNG, so scripts/bench.mjs can
-// sign in as one of them. Synthetic test data: do not run this against a backend with real players.
+// Two paths, same deterministic data (scripts/bench.mjs works with either):
+//   - MASTER_KEY in .env (local dev server): one anonymous _User per player (username seed-<seed>-<i>, plus the
+//     _Session row Parse creates for every sign-up) and one Best row per level, written through /batch with
+//     the master key. ≈ 40k requests for 1M players × 1 level (users + bests).
+//   - no MASTER_KEY (Back4app: the key stays in the dashboard): rows go through the Cloud function seedBest,
+//     50 rows per call, player = null, seeded = true, seedKey = seed-<seed>-<i>:<level> (re-runs skip rows that
+//     exist). Budget: 1,000,000 rows / 50 per call = 20,000 requests ≈ 21 min at 16 req/s. No _User/_Session.
+//     Requires Cloud Code deployed with config.SETUP_ENABLED = true.
+// Synthetic test data: do not run this against a backend with real players.
 import { loadEnv, parseArgs } from './lib/env.mjs';
 import { makeClient, tokenBucket, rng } from './lib/rest.mjs';
 import config from '../cloud/config.js';
@@ -18,7 +23,7 @@ const n = Number(args.n ?? 1000);
 const levels = Number(args.levels ?? 3);
 const seed = Number(args.seed ?? 42);
 const rps = Number(args.rps ?? 16);
-const batchSize = Math.min(50, Number(args.batch ?? 50));
+const batchSize = Math.min(config.SEED_BATCH_MAX, Number(args.batch ?? config.SEED_BATCH_MAX));
 const from = Number(args.from ?? 0);
 const concurrency = Number(args.concurrency ?? 4);
 if (!Number.isInteger(n) || n < 1 || !Number.isInteger(levels) || levels < 1 || levels > config.MAX_LEVEL) {
@@ -26,7 +31,7 @@ if (!Number.isInteger(n) || n < 1 || !Number.isInteger(levels) || levels < 1 || 
   process.exit(2);
 }
 
-const env = loadEnv({ master: true });
+const env = loadEnv();
 const api = makeClient(env, { retry: true, maxAttempts: 10 });
 const bucket = tokenBucket(rps);
 const week = config.weekKey(new Date());
@@ -47,19 +52,38 @@ export function seededPlayer(i, seedValue = seed, levelCount = levels) {
   return { i, anonymousId, username, scores };
 }
 
+/** The row seedBest gets for player i on `level` (no master key path). */
+export function seededBestRow(player, score) {
+  return { playerName: player.username, level: score.level, score: score.score, week, weekScore: score.score, seedKey: `${player.username}:${score.level}` };
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const t0 = Date.now();
-  let usersCreated = 0, usersExisting = 0, bestsCreated = 0, requests = 0;
+  const mode = env.MASTER_KEY ? 'master key (users + bests via /batch)' : 'Cloud function seedBest (no master key; player = null)';
+  console.log(`seeding ${n - from} players × ${levels} level(s) at ${env.SERVER_URL} — ${mode}`);
+  let usersCreated = 0, usersExisting = 0, bestsCreated = 0, bestsSkipped = 0, requests = 0;
   let next = from;
   const total = n;
 
-  async function worker() {
+  let completed = 0, lastPrinted = 0;
+  function progress(players) {
+    completed += players;
+    if (completed - lastPrinted < 1000 && completed < total - from) return;
+    lastPrinted = completed;
+    const elapsed = (Date.now() - t0) / 1000;
+    const rate = completed / elapsed;
+    const eta = rate > 0 ? Math.round((total - from - completed) / rate) : 0;
+    const users = env.MASTER_KEY ? ` · users +${usersCreated} (reused ${usersExisting})` : '';
+    console.log(`players ${from + completed}/${total}${users} · bests +${bestsCreated} (skipped ${bestsSkipped}) · ${requests} req · ${elapsed.toFixed(0)} s · eta ${eta} s`);
+  }
+
+  async function workerMaster() {
     for (;;) {
       const start = next;
       if (start >= total) return;
-      next = Math.min(total, start + batchSize);
+      const end = next = Math.min(total, start + batchSize);
       const players = [];
-      for (let i = start; i < next; i++) players.push(seededPlayer(i));
+      for (let i = start; i < end; i++) players.push(seededPlayer(i));
 
       await bucket.take();
       requests++;
@@ -100,22 +124,43 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           else throw new Error(`best: ${JSON.stringify(item.error)}`);
         }
       }
-      if ((next - from) % (batchSize * 20) === 0 || next === total) {
-        const elapsed = (Date.now() - t0) / 1000;
-        const done = next - from;
-        const rate = done / elapsed;
-        const eta = rate > 0 ? Math.round((total - next) / rate) : 0;
-        console.log(`players ${next}/${total} · users +${usersCreated} (reused ${usersExisting}) · bests +${bestsCreated} · ${requests} req · ${elapsed.toFixed(0)} s · eta ${eta} s`);
+      progress(end - start);
+    }
+  }
+
+  async function workerCloud() {
+    for (;;) {
+      const start = next;
+      if (start >= total) return;
+      const end = next = Math.min(total, start + Math.max(1, Math.floor(batchSize / levels)));
+      const rows = [];
+      for (let i = start; i < end; i++) {
+        const p = seededPlayer(i);
+        for (const s of p.scores) rows.push(seededBestRow(p, s));
       }
+      for (let k = 0; k < rows.length; k += batchSize) {
+        await bucket.take();
+        requests++;
+        const r = await api.call('seedBest', { rows: rows.slice(k, k + batchSize) });
+        if (!r.ok) {
+          const e = r.error;
+          if (/Invalid function/.test(e.message || '')) throw new Error('seedBest: Cloud Code not deployed (Invalid function) — upload cloud/main.js and cloud/config.js');
+          if (e.code === 'SETUP_DISABLED') throw new Error('seedBest: disabled (cloud/config.js SETUP_ENABLED = false); seed with MASTER_KEY instead');
+          throw new Error(`seedBest batch at player ${start} failed: ${JSON.stringify(e).slice(0, 300)}`);
+        }
+        bestsCreated += r.result.created;
+        bestsSkipped += r.result.skipped;
+      }
+      progress(end - start);
     }
   }
 
   try {
-    await Promise.all(Array.from({ length: concurrency }, worker));
+    await Promise.all(Array.from({ length: concurrency }, env.MASTER_KEY ? workerMaster : workerCloud));
   } catch (err) {
     console.error(err.message);
     console.error(`resume with: npm run seed -- --n ${n} --levels ${levels} --seed ${seed} --from ${Math.max(from, next - batchSize * concurrency)}`);
     process.exit(1);
   }
-  console.log(`seeded ${n - from} players × ${levels} level(s) (seed ${seed}, week ${week}) in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  console.log(`seeded ${n - from} players × ${levels} level(s) (seed ${seed}, week ${week}) in ${((Date.now() - t0) / 1000).toFixed(1)} s · ${requests} requests`);
 }
