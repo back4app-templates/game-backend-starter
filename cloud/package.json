@@ -1,0 +1,4 @@
+{
+  "type": "commonjs",
+  "description": "Cloud Code is CommonJS (Back4app runs it on Node 19). The root package.json is ESM; this file keeps cloud/*.js CommonJS for the local parse-server. Not uploaded to Back4app."
+}

@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.local.json
+docs/evidence/*.csv
+docs/evidence/*.json
+!docs/evidence/README.md
+.DS_Store
+logs/

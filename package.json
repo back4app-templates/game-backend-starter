@@ -1,0 +1,27 @@
+{
+  "name": "game-backend-starter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Player accounts, leaderboards and cloud saves for a game on a general backend-as-a-service (Back4app / Parse Server). Companion repository for the blog article.",
+  "license": "MIT",
+  "author": "Back4app Engineering",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev:server": "node scripts/dev-server.mjs",
+    "dev:web": "node server.js",
+    "setup": "node scripts/setup.mjs",
+    "seed": "node scripts/seed.mjs",
+    "bench": "node scripts/bench.mjs",
+    "test": "node scripts/run-tests.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "parse-server": "^7.5.4"
+  }
+}

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Game backend starter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>Game backend starter</h1>
+    <p class="muted">Player accounts, leaderboards and cloud saves on Parse Server / Back4app. Everything below goes through Cloud functions; the client never writes a score or a save directly.</p>
+  </header>
+
+  <section id="account">
+    <h2>1. Account</h2>
+    <div id="who" class="muted">Not signed in.</div>
+    <div class="row">
+      <button id="btn-guest">Play as guest</button>
+      <button id="btn-logout" class="secondary" hidden>Sign out</button>
+    </div>
+    <form id="form-upgrade" class="stack" hidden>
+      <p class="muted">Keep this guest's progress on a real account (same user id, same Player, Best and Save rows).</p>
+      <div class="row">
+        <input id="upgrade-username" placeholder="username" autocomplete="username" required minlength="3">
+        <input id="upgrade-password" type="password" placeholder="password" autocomplete="new-password" required minlength="8">
+        <button type="submit">Upgrade account</button>
+      </div>
+    </form>
+    <form id="form-login" class="stack">
+      <div class="row">
+        <input id="login-username" placeholder="username" autocomplete="username" required>
+        <input id="login-password" type="password" placeholder="password" autocomplete="current-password" required>
+        <button type="submit" class="secondary">Sign in</button>
+      </div>
+    </form>
+    <form id="form-profile" class="row" hidden>
+      <input id="profile-name" placeholder="display name" minlength="2" maxlength="24">
+      <input id="profile-country" placeholder="country (2 letters)" maxlength="2" size="4">
+      <button type="submit" class="secondary">Save profile</button>
+    </form>
+  </section>
+
+  <section id="scores">
+    <h2>2. Scores — level 1</h2>
+    <p class="muted">The "game" is a button: it produces a random score under the level-1 ceiling (<span id="ceiling">10000</span>), stamps it with the next session counter and a fresh nonce, and calls <code>submitScore</code>. Try the cheat buttons to see the rejections.</p>
+    <div class="row">
+      <button id="btn-play" disabled>Play a round and submit</button>
+      <button id="btn-cheat-ceiling" class="secondary" disabled>Submit an impossible score</button>
+      <button id="btn-cheat-replay" class="secondary" disabled>Replay the last submission</button>
+    </div>
+    <div id="submit-result" class="result"></div>
+    <div class="cols">
+      <div>
+        <h3>Top 10 <select id="scope"><option value="alltime">all-time</option><option value="weekly">this week</option></select></h3>
+        <ol id="top10" class="board"></ol>
+      </div>
+      <div>
+        <h3>My rank</h3>
+        <div id="myrank" class="big muted">—</div>
+        <button id="btn-refresh" class="secondary">Refresh</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="saves">
+    <h2>3. Cloud save — slot 0</h2>
+    <p class="muted">The save blob is a JSON string. <code>putSave</code> takes the version you loaded; if someone else saved since, you get <code>STALE_SAVE</code> with the current version instead of silently overwriting.</p>
+    <textarea id="save-blob" rows="4" spellcheck="false">{"level":1,"hp":3,"inventory":["sword"]}</textarea>
+    <div class="row">
+      <button id="btn-load" disabled>Load slot 0</button>
+      <button id="btn-save" disabled>Save slot 0</button>
+      <span id="save-version" class="muted">version: —</span>
+    </div>
+    <div id="save-result" class="result"></div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/parse@8.6.2/dist/parse.min.js"></script>
+<script src="/config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

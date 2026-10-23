@@ -1,0 +1,22 @@
+:root { color-scheme: light dark; --fg: #1b1f23; --bg: #fafafa; --muted: #6a737d; --line: #d0d7de; --accent: #1f6feb; --ok: #1a7f37; --err: #cf222e; --card: #fff; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --bg: #0d1117; --muted: #8b949e; --line: #30363d; --accent: #58a6ff; --ok: #3fb950; --err: #f85149; --card: #161b22; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; color: var(--fg); background: var(--bg); }
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 1.6rem; margin: 0 0 4px; } h2 { font-size: 1.15rem; margin: 0 0 8px; } h3 { font-size: 1rem; margin: 12px 0 6px; }
+section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-top: 16px; }
+.muted { color: var(--muted); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.stack { margin: 8px 0; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } @media (max-width: 600px) { .cols { grid-template-columns: 1fr; } }
+button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+button.secondary { background: transparent; color: var(--accent); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+input, textarea, select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.result { min-height: 1.5em; margin: 4px 0; } .result.ok { color: var(--ok); } .result.err { color: var(--err); }
+.board { margin: 0; padding-left: 0; list-style: none; } .board li { display: flex; gap: 8px; padding: 2px 0; border-bottom: 1px dashed var(--line); }
+.board .rank { width: 2.5em; color: var(--muted); } .board .name { flex: 1; } .board .me { font-weight: 600; }
+.big { font-size: 1.6rem; }
+pre { font-size: 12px; max-height: 240px; overflow: auto; background: var(--bg); padding: 8px; border-radius: 6px; margin: 0; white-space: pre-wrap; }
+code { font-size: .9em; }
