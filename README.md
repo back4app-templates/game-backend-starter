@@ -120,11 +120,15 @@ is in `AGENTS.md`.
    {"code":141,"error":"Invalid function: \"ensurePlayer\""}   ← not deployed
    ```
    `npm run setup` prints the same verdict as its last line.
-5. **Tie-break index** (*manual check*): Dashboard → Database → `Best` → Indexes. You should see `best_alltime`
-   `{level:1, score:-1, createdAt:1}`, `best_weekly` `{level:1, week:1, weekScore:-1, createdAt:1}`,
-   `best_player_level` and `best_seedKey`. If an index is missing (the schema API on MongoDB creates them
-   asynchronously), create it there with exactly those keys; the leaderboard sort and `myRank` count rely on
-   them at scale.
+5. **Tie-break indexes** (*manual*, MongoDB only): Dashboard → Database → `Best` → Index Manager. You will see the
+   four indexes the schema created — but their `createdAt` key is the Parse field name, and MongoDB stores that
+   column as `_created_at`, so the leaderboard's tie-break sort (`score desc, createdAt asc`) cannot use them:
+   measured at 1,000,000 rows, the top-100 took 4.6 s instead of 0.1 s of database time. Add two indexes there
+   with *Add an Index* (the dashboard maps `createdAt` to `_created_at` by itself):
+   `best_alltime_ca` = level asc, score desc, createdAt asc and `best_weekly_ca` = level asc, week asc,
+   weekScore desc, createdAt asc. The Fields column must read `{"level":1,"score":-1,"_created_at":1}` and
+   `{"level":1,"week":1,"weekScore":-1,"_created_at":1}`. `myRank` counts with a `hint` on `best_alltime` /
+   `best_weekly` (the MongoDB 3.6 planner picked a ~3 s plan for the same count without it).
 6. **Smoke test**: `TEST_SERVER_URL=https://parseapi.back4app.com npm test` points the suite at Back4app without
    touching the master key; it creates throw-away anonymous users and 500 `Best` rows on level 77. Do that on a
    staging app, not where real players live.

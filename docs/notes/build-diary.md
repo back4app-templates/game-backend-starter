@@ -67,3 +67,23 @@
 - **Seed 1,000,000 `Best` rows via `seedBest`, REST key only:** 20,000 requests of 50 rows at the 16 req/s bucket;
   first 400k rows in 963 s (≈425 rows/s); 150 rows skipped by `seedKey` after a throttled request was retried —
   the dedup path working as designed. Full numbers in `docs/evidence/seed-live-2026-10-23.log`.
+
+### Leaderboard at 1,000,000 rows — why the first live bench was slow, and the two fixes
+
+First bench after the seed (`bench-back4app-2026-10-23T14-44-40.csv`): top-100 **p50 4.56 s**, myRank **p50 2.45 s**,
+against a network baseline of ~1.2 s (`GET /health` p50 1.178 s, 30 runs, same client — the same machine measured
+160 ms sign-ins on another app earlier in the day; the route to the platform was slow this afternoon).
+
+1. **Index key names.** `Parse.Schema` (and the schema REST API) create MongoDB indexes with the field names you
+   pass, untranslated: `createdAt` becomes an index on a key that no document has — MongoDB stores it as
+   `_created_at`. So `{level:1, score:-1, createdAt:1}` served `where level=1 order -score` (1.3 s, = baseline)
+   but not `order -score,createdAt` (6.6 s: in-memory sort of 1M rows). The dashboard's Index Manager *does* map
+   `createdAt` → `_created_at`: `best_alltime_ca` and `best_weekly_ca` created there (built in ~3 min on 1M rows)
+   brought the tie-break sort back to 1.26 s. README step 5 rewritten.
+2. **The count's query plan.** `count where level=1 and score>X` took ~4.4 s whether X matched 298 rows or
+   300,000, while the weekly variant (`level, week, weekScore>X`) took 1.2 s and `score=9999` (equality) 1.4 s.
+   `hint=best_alltime_ca` → 1.15 s; `hint=best_alltime` (the schema-created one) → 2.2 s at 300k matches. The
+   MongoDB 3.6 planner on this (sharded, Free-plan) cluster picks a bad plan for the range count; `myRank` now
+   hints `best_alltime` / `best_weekly` (Postgres adapter ignores hints; 19/19 locally).
+- Both Free-plan backends used today run **MongoDB 3.6** (App Settings → General); MVP and up advertise "latest
+  MongoDB". The feasibility backend is also over its 25K monthly requests ("can stop responding at any moment").

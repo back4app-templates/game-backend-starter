@@ -418,6 +418,10 @@ Parse.Cloud.define('myRank', async (request) => {
   q.equalTo('level', level);
   if (scope === 'weekly') q.equalTo('week', week);
   q.greaterThan(field, myScore);
+  // Measured on Back4app (MongoDB 3.6, 1,000,000 Best rows, 2026-10-23): without a hint the planner ran this count
+  // in ~3 s whatever the selectivity (298 or 300,000 matching rows), with the hint it is an index range again
+  // (~0.5-1 s of database time at 300,000 rows). The PostgreSQL adapter ignores hints, so local runs are unaffected.
+  q.hint(scope === 'weekly' ? 'best_weekly' : 'best_alltime');
   const above = await q.count(MASTER);
   return { level: level, scope: scope, week: week, rank: above + 1, score: myScore, best: bestJson(mine) };
 });
