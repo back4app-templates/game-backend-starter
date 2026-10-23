@@ -15,3 +15,8 @@ What goes here (CSV/JSON files are gitignored by default; `git add -f` the ones 
 
 Record the target too: Back4app plan, region, Parse Server version shown in the dashboard, and the date. A
 latency number without the dataset size and the target is noise.
+- `bench-back4app-2026-10-23T14-44-40*.csv` — live run 1: schema indexes only (top-100 p50 4.56 s).
+- `bench-back4app-fixed-index-2026-10-23T15-23-13*.csv` — live run 2: after the `_created_at` tie-break indexes (top-100 p50 428 ms).
+- `bench-back4app-hinted-2026-10-23T15-36-30*.csv` — live run 3: plus the `myRank` hint (myRank unchanged at rank 545,293).
+- `myrank-by-position-2026-10-23.txt` — myRank p50 at ranks 36 / 34,671 / 206,194 / 783,956: linear in rows above the player.
+- `health-baseline-during-bench3-2026-10-23.txt` — `GET /health` timings during run 3 (not a usable baseline: slower than the functions themselves).

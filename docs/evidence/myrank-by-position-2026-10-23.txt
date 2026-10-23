@@ -1,0 +1,11 @@
+myRank cost by position on the board — backend game-backend-starter (Free plan, MongoDB 3.6), 2026-10-23 ~15:50 UTC
+1,000,511 Best rows on level 1 (1,000,000 seeded + test rows). Cloud function myRank with the hint on best_alltime.
+Four throw-away guests, each submitted one score, then 2 warm-ups + 10 timed calls (curl, one client outside the US).
+In the same minute, leaderboard top-100 (the round-trip reference) took 1.30–1.46 s.
+
+score 9998 rank 36:      myRank p50 1205 ms (min 1151, max 1264)
+score 9000 rank 34671:   myRank p50 1313 ms (min 1275, max 1629)
+score 5000 rank 206194:  myRank p50 2032 ms (min 1981, max 2227)
+score 100  rank 783956:  myRank p50 4124 ms (min 4016, max 4597)
+
+≈ 3.7 µs per row above the player: the count walks (and apparently fetches) every matching row on this engine.

@@ -87,3 +87,10 @@ against a network baseline of ~1.2 s (`GET /health` p50 1.178 s, 30 runs, same c
    hints `best_alltime` / `best_weekly` (Postgres adapter ignores hints; 19/19 locally).
 - Both Free-plan backends used today run **MongoDB 3.6** (App Settings → General); MVP and up advertise "latest
   MongoDB". The feasibility backend is also over its 25K monthly requests ("can stop responding at any moment").
+- **Third bench (hinted, 15:36 UTC):** top-100 468/426 ms p50, myRank 2,365/2,363 ms p50 at rank 545,293 — the hint
+  did not move the function's number. `docs/evidence/myrank-by-position-2026-10-23.txt` explains why: the count is
+  linear in the rows above the player (1.2 s at rank 36 → 4.1 s at rank 783,956, ≈3.7 µs per row), i.e. MongoDB 3.6
+  walks every matching row for `countDocuments`. The hint only removed the planner's extra ~3 s. Design consequence
+  for the article: rank for players deep in the board should be cached, bucketed or shown as a percentile.
+- Round trips for identical calls varied between ~0.43 s and ~1.3 s within the hour (route, not backend): compare the
+  three bench runs by the gap between operations, not by absolute values.
