@@ -3,7 +3,8 @@
 Player accounts, leaderboards and cloud saves for a game, on a general backend-as-a-service: **Back4app** (Parse
 Server 7, MongoDB) for the data and Cloud Code, **Back4app Containers** for the tiny demo web client. Companion
 repository for the article *"Game backend: player accounts, leaderboards and cloud saves on a general
-backend-as-a-service"*. MIT licensed, by Back4app Engineering.
+backend-as-a-service"*. MIT licensed, by Back4app Engineering. Live demo client: https://gamebackendstarter-nqa56pyp.b4a.run (Back4app Containers,
+Node.js Buildpack, deployed from an upload of this folder; the board holds the 1,000,000 seeded scores).
 
 In scope: anonymous sign-up and account upgrade, a `Player` profile, score submission with abuse bounds, all-time
 and weekly leaderboards with tie-aware ranks, three versioned cloud-save slots. Out of scope on purpose: no
