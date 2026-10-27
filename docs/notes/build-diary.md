@@ -94,3 +94,15 @@ against a network baseline of ~1.2 s (`GET /health` p50 1.178 s, 30 runs, same c
   for the article: rank for players deep in the board should be cached, bucketed or shown as a percentile.
 - Round trips for identical calls varied between ~0.43 s and ~1.3 s within the hour (route, not backend): compare the
   three bench runs by the gap between operations, not by absolute values.
+
+### 2026-10-27 — editorial review follow-up: explain output and storage
+
+- `GET /classes/Best?explain=true` works with the REST key on Back4app (sharded cluster, `SINGLE_SHARD`). For
+  `where level=1 and score>9990, limit 1000` the winning plan is **IXSCAN best_weekly_ca** with `week [MinKey, MaxKey]`
+  and a FETCH filter on `score`: 1,000,013 keys and 1,000,013 documents examined to return 299 rows in 2,508 ms.
+  With `hint=best_alltime` the IXSCAN bounds become `score [inf, 7000)`. So the slow rank count was a wrong index
+  choice plus a document fetch per entry, not an index-only scan. Raw plans: `docs/evidence/explain-*.json`.
+  (`count=1` with `explain=true` returns only the count through the REST API — no plan for counts.)
+- Plan Usage of this backend after the seed: **Database Storage 329.19 MB of 0.25 GB included**, requests 22.55 K of
+  25 K. One million `Best` rows plus indexes exceed the Free plan's storage allowance; storage, not requests, is the
+  first limit a seeded leaderboard hits on Free. The article's earlier claim was wrong and is corrected.

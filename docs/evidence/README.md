@@ -20,3 +20,4 @@ latency number without the dataset size and the target is noise.
 - `bench-back4app-hinted-2026-10-23T15-36-30*.csv` — live run 3: plus the `myRank` hint (myRank unchanged at rank 545,293).
 - `myrank-by-position-2026-10-23.txt` — myRank p50 at ranks 36 / 34,671 / 206,194 / 783,956: linear in rows above the player.
 - `health-baseline-during-bench3-2026-10-23.txt` — `GET /health` timings during run 3 (not a usable baseline: slower than the functions themselves).
+- `explain-find-*-2026-10-27.json` — MongoDB explain for the rank predicate (`level=1, score>X`): without a hint the planner picks `best_weekly_ca` and examines every level-1 document; with `hint=best_alltime` it reads an index range. Counts cannot be explained through the REST API.
